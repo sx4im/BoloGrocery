@@ -54,14 +54,83 @@ export default function Home() {
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [currentLanguage, setCurrentLanguage] = useState('ur-PK');
   const [interimTranscript, setInterimTranscript] = useState('');
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [browserType, setBrowserType] = useState<'chrome' | 'brave' | 'safari' | 'other'>('other');
+  const [isMobile, setIsMobile] = useState(false);
+  const [languageAttempts, setLanguageAttempts] = useState<string[]>([]);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const listContainerRef = useRef<HTMLDivElement>(null);
   const isStartingRef = useRef(false);
+  const retryCountRef = useRef(0);
   const { toast } = useToast();
 
   useEffect(() => {
     localStorage.setItem('bolo-grocery-items', JSON.stringify(groceryItems));
   }, [groceryItems]);
+
+  // Detect browser type, mobile device, and monitor network status
+  useEffect(() => {
+    // Detect mobile device
+    const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.innerWidth <= 768;
+    setIsMobile(isMobileDevice);
+    
+    // Detect browser type
+    const userAgent = navigator.userAgent.toLowerCase();
+    if (userAgent.includes('brave')) {
+      setBrowserType('brave');
+    } else if (userAgent.includes('chrome')) {
+      setBrowserType('chrome');
+    } else if (userAgent.includes('safari') && !userAgent.includes('chrome')) {
+      setBrowserType('safari');
+    } else {
+      setBrowserType('other');
+    }
+
+    // Set initial language based on device and browser
+    if (isMobileDevice && browserType === 'chrome') {
+      // Chrome mobile works better with English first, then fallback to Urdu
+      setCurrentLanguage('en-US');
+      setLanguageAttempts(['en-US', 'ur-PK', 'en-GB']);
+    } else if (isMobileDevice) {
+      // Other mobile browsers - try English first
+      setCurrentLanguage('en-US');
+      setLanguageAttempts(['en-US', 'ur-PK']);
+    } else {
+      // Desktop - start with Urdu
+      setLanguageAttempts(['ur-PK', 'en-US', 'en-GB']);
+    }
+
+    // Monitor network status
+    const handleOnline = () => {
+      setIsOnline(true);
+      console.log('Network connection restored');
+    };
+
+    const handleOffline = () => {
+      setIsOnline(false);
+      console.log('Network connection lost');
+      if (isListening && recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (error) {
+          console.warn('Error stopping recognition on offline:', error);
+        }
+      }
+      toast({
+        title: "Network Offline",
+        description: "Internet connection lost. Speech recognition requires internet connectivity.",
+        variant: "destructive",
+      });
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [isListening, toast]);
 
   // Initialize speech recognition
   useEffect(() => {
@@ -94,11 +163,21 @@ export default function Home() {
         // Initialize speech recognition
         const recognition = new SpeechRecognition();
         
-        // Configure recognition settings
+        // Configure recognition settings based on browser and device
         recognition.continuous = false;
-        recognition.interimResults = true;
-        recognition.maxAlternatives = 3;
+        recognition.interimResults = isMobile ? false : true; // Mobile works better without interim results
+        recognition.maxAlternatives = isMobile ? 1 : (browserType === 'brave' ? 1 : 3);
         recognition.lang = currentLanguage;
+        
+        // Mobile-specific optimizations
+        if (isMobile) {
+          console.log(`Optimizing for mobile device (${browserType})`);
+          // Mobile devices work better with these settings
+          recognition.continuous = false;
+          recognition.interimResults = false;
+        } else {
+          console.log(`Optimizing for desktop (${browserType})`);
+        }
 
         // Event handlers
         recognition.onstart = () => {
@@ -167,7 +246,20 @@ export default function Home() {
               break;
             case 'network':
               errorTitle = "Network Error";
-              errorDescription = "Internet connection required for speech recognition. Please check your connection.";
+              if (!isOnline) {
+                errorDescription = "No internet connection. Speech recognition requires internet connectivity.";
+              } else {
+                errorDescription = `Network issue detected. ${browserType === 'brave' ? 'Brave browser may have connectivity restrictions.' : 'Please check your internet connection.'} Retrying...`;
+                // Auto-retry for network errors
+                if (retryCountRef.current < 2) {
+                  retryCountRef.current++;
+                  setTimeout(() => {
+                    console.log(`Retrying speech recognition (attempt ${retryCountRef.current})`);
+                    handleStartListening();
+                  }, 2000);
+                  return; // Don't show error toast for auto-retry
+                }
+              }
               break;
             case 'service-not-allowed':
               errorTitle = "Service Not Available";
@@ -179,16 +271,22 @@ export default function Home() {
               break;
             case 'language-not-supported':
               errorTitle = "Language Not Supported";
-              errorDescription = `${currentLanguage} is not supported. Trying English fallback...`;
-              // Try fallback to English
-              if (currentLanguage !== 'en-US') {
-                setCurrentLanguage('en-US');
+              // Try next language in fallback list
+              const currentIndex = languageAttempts.indexOf(currentLanguage);
+              const nextIndex = currentIndex + 1;
+              
+              if (nextIndex < languageAttempts.length) {
+                const nextLanguage = languageAttempts[nextIndex];
+                errorDescription = `${currentLanguage} not supported. Switching to ${nextLanguage === 'en-US' ? 'English (US)' : nextLanguage === 'en-GB' ? 'English (UK)' : 'Urdu'}...`;
+                setCurrentLanguage(nextLanguage);
                 setTimeout(() => {
-                  toast({
-                    title: "Language Changed",
-                    description: "Switched to English. Please try again.",
-                  });
-                }, 1000);
+                  if (recognitionRef.current) {
+                    recognitionRef.current.lang = nextLanguage;
+                    handleStartListening();
+                  }
+                }, 1500);
+              } else {
+                errorDescription = "No supported languages available for speech recognition on this device.";
               }
               break;
             default:
@@ -213,11 +311,38 @@ export default function Home() {
 
         recognition.onnomatch = () => {
           console.log('No speech match found');
-          toast({
-            title: "No Match Found",
-            description: "Could not understand the speech. Please try again.",
-            variant: "destructive",
-          });
+          
+          // Try next language in the fallback list
+          const currentIndex = languageAttempts.indexOf(currentLanguage);
+          const nextIndex = currentIndex + 1;
+          
+          if (nextIndex < languageAttempts.length) {
+            const nextLanguage = languageAttempts[nextIndex];
+            console.log(`Switching language from ${currentLanguage} to ${nextLanguage}`);
+            setCurrentLanguage(nextLanguage);
+            
+            toast({
+              title: "Language Switch",
+              description: `Switching to ${nextLanguage === 'en-US' ? 'English (US)' : nextLanguage === 'en-GB' ? 'English (UK)' : 'Urdu'}. Please try again.`,
+            });
+            
+            // Restart recognition with new language
+            setTimeout(() => {
+              if (recognitionRef.current) {
+                recognitionRef.current.lang = nextLanguage;
+                handleStartListening();
+              }
+            }, 1000);
+          } else {
+            // All languages tried, show error
+            toast({
+              title: "No Match Found",
+              description: isMobile 
+                ? "Could not understand speech. Try speaking clearly in English or Urdu. Make sure you're in a quiet environment."
+                : "Could not understand the speech. Please try again.",
+              variant: "destructive",
+            });
+          }
         };
 
         recognitionRef.current = recognition;
@@ -249,27 +374,21 @@ export default function Home() {
     };
   }, [toast, currentLanguage]);
 
-  const handleRequestMicPermission = async () => {
-    try {
-      await navigator.mediaDevices.getUserMedia({ audio: true });
-      toast({
-        title: "Permission Granted",
-        description: "Microphone access has been granted. You can now use voice input.",
-      });
-    } catch (error) {
-      console.error('Microphone permission error:', error);
-      toast({
-        title: "Permission Denied",
-        description: "Please allow microphone access in your browser settings to use voice input.",
-        variant: "destructive",
-      });
-    }
-  };
 
   const handleStartListening = async () => {
     // Check if already starting or listening
     if (isStartingRef.current || isListening) {
       console.log('Already starting or listening, ignoring request');
+      return;
+    }
+
+    // Check network connectivity
+    if (!isOnline) {
+      toast({
+        title: "No Internet Connection",
+        description: "Speech recognition requires internet connectivity. Please check your connection and try again.",
+        variant: "destructive",
+      });
       return;
     }
 
@@ -322,11 +441,14 @@ export default function Home() {
       }
     }
 
+    // Reset retry counter on manual start
+    retryCountRef.current = 0;
+    
     // Start recognition
     isStartingRef.current = true;
     
     try {
-      console.log('Starting speech recognition...');
+      console.log(`Starting speech recognition... (Browser: ${browserType}, Language: ${currentLanguage})`);
       recognitionRef.current.start();
       
       // Set a timeout to reset the starting flag if start doesn't trigger onstart
@@ -527,18 +649,23 @@ export default function Home() {
             </div>
             
             {/* Action Buttons Grid */}
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               
               {/* Speak Item Button */}
               <button 
                 onClick={handleStartListening}
-                disabled={isListening || !isSupported}
+                disabled={isListening || !isSupported || !isOnline}
                 data-testid="button-speak-item"
-                className="col-span-2 flex items-center justify-center gap-2 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold py-4 px-6 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg active:scale-95 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                className="col-span-2 md:col-span-3 flex items-center justify-center gap-2 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold py-4 px-6 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg active:scale-95 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed">
                 <Mic className="w-5 h-5" />
                 <span className="text-base">
-                  {isListening ? "Listening..." : "Speak Item"}
+                  {!isOnline ? "Offline" : isListening ? "Listening..." : "Speak Item"}
                 </span>
+                {!isOnline && (
+                  <span className="text-xs bg-destructive text-destructive-foreground px-2 py-1 rounded-full ml-2">
+                    No Internet
+                  </span>
+                )}
               </button>
               
               {/* Download PDF Button */}
@@ -559,14 +686,28 @@ export default function Home() {
                 <span className="text-xs sm:text-sm">Save PNG</span>
               </button>
               
-              {/* Request Microphone Permission Button */}
+              {/* Language Switch Button */}
               <button 
-                onClick={handleRequestMicPermission}
-                data-testid="button-mic-permission"
+                onClick={() => {
+                  const currentIndex = languageAttempts.indexOf(currentLanguage);
+                  const nextIndex = (currentIndex + 1) % languageAttempts.length;
+                  const nextLanguage = languageAttempts[nextIndex];
+                  setCurrentLanguage(nextLanguage);
+                  if (recognitionRef.current) {
+                    recognitionRef.current.lang = nextLanguage;
+                  }
+                  toast({
+                    title: "Language Changed",
+                    description: `Switched to ${nextLanguage === 'en-US' ? 'English (US)' : nextLanguage === 'en-GB' ? 'English (UK)' : 'Urdu'}`,
+                  });
+                }}
+                data-testid="button-language-switch"
                 className="flex items-center justify-center gap-2 bg-accent/10 hover:bg-accent/20 text-accent-foreground font-medium py-3 px-4 rounded-lg transition-all duration-200 border border-accent/20 hover:border-accent/40 active:scale-95 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2">
-                <Mic className="w-4 h-4" />
-                <span className="text-sm">Allow Mic</span>
+                <span className="text-xs sm:text-sm">
+                  {currentLanguage === 'ur-PK' ? '🇵🇰 اردو' : currentLanguage === 'en-US' ? '🇺🇸 EN' : '🇬🇧 EN'}
+                </span>
               </button>
+
               
               {/* Clear All Button */}
               <button 
@@ -705,8 +846,23 @@ export default function Home() {
             <div className="flex items-start gap-3">
               <Info className="w-5 h-5 text-accent-foreground flex-shrink-0 mt-0.5" />
               <div className="flex-1">
-                <p className="text-sm text-accent-foreground font-medium mb-1">Browser Compatibility</p>
-                <p className="text-xs text-accent-foreground/80">This app requires a modern browser with Web Speech API support (Chrome, Edge, Safari). Urdu voice recognition works best in Chrome.</p>
+                <p className="text-sm text-accent-foreground font-medium mb-1">
+                  {isMobile ? '📱 Mobile' : '💻 Desktop'} • {browserType.charAt(0).toUpperCase() + browserType.slice(1)} 
+                  {!isOnline && <span className="text-destructive ml-2">(Offline)</span>}
+                  {isOnline && <span className="text-green-600 ml-2">(Online)</span>}
+                </p>
+                <p className="text-xs text-accent-foreground/80 mb-2">
+                  Current Language: {currentLanguage === 'ur-PK' ? '🇵🇰 Urdu (Pakistan)' : currentLanguage === 'en-US' ? '🇺🇸 English (US)' : '🇬🇧 English (UK)'}
+                </p>
+                <p className="text-xs text-accent-foreground/80">
+                  {isMobile && 'Mobile optimized for better recognition. '}
+                  {browserType === 'brave' && 'Brave may have network restrictions. '}
+                  {browserType === 'chrome' && isMobile && 'Chrome mobile works best with English first. '}
+                  {browserType === 'chrome' && !isMobile && 'Chrome optimal for Urdu recognition. '}
+                  {browserType === 'safari' && 'Safari has limited Urdu support. '}
+                  {browserType === 'other' && 'Browser compatibility may vary. '}
+                  Auto-switches languages if no match found.
+                </p>
               </div>
             </div>
           </div>
