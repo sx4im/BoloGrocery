@@ -537,7 +537,7 @@ export default function Home() {
                 className="col-span-2 flex items-center justify-center gap-2 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold py-4 px-6 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg active:scale-95 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed">
                 <Mic className="w-5 h-5" />
                 <span className="text-base">
-                  {isListening ? "Listening..." : "🎤 Speak Item"}
+                  {isListening ? "Listening..." : "Speak Item"}
                 </span>
               </button>
               
@@ -547,7 +547,7 @@ export default function Home() {
                 data-testid="button-download-pdf"
                 className="flex items-center justify-center gap-2 bg-secondary hover:bg-secondary/90 text-secondary-foreground font-medium py-3 px-4 rounded-lg transition-all duration-200 shadow hover:shadow-md active:scale-95 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2">
                 <Download className="w-4 h-4" />
-                <span className="text-xs sm:text-sm">Download PDF</span>
+                <span className="text-xs sm:text-sm">Save PDF</span>
               </button>
               
               {/* Download PNG Button */}
@@ -556,7 +556,7 @@ export default function Home() {
                 data-testid="button-download-png"
                 className="flex items-center justify-center gap-2 bg-secondary hover:bg-secondary/90 text-secondary-foreground font-medium py-3 px-4 rounded-lg transition-all duration-200 shadow hover:shadow-md active:scale-95 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2">
                 <FileImage className="w-4 h-4" />
-                <span className="text-xs sm:text-sm">Download PNG</span>
+                <span className="text-xs sm:text-sm">Save PNG</span>
               </button>
               
               {/* Request Microphone Permission Button */}
