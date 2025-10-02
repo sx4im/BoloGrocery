@@ -5,18 +5,32 @@ import { useToast } from "@/hooks/use-toast";
 // TypeScript interfaces for Web Speech API
 interface SpeechRecognitionEvent {
   results: SpeechRecognitionResultList;
+  resultIndex: number;
+}
+
+interface SpeechRecognitionErrorEvent {
+  error: string;
+  message?: string;
 }
 
 interface SpeechRecognition extends EventTarget {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
+  maxAlternatives: number;
+  serviceURI?: string;
   start(): void;
   stop(): void;
-  onstart: () => void;
-  onresult: (event: SpeechRecognitionEvent) => void;
-  onerror: (event: { error: string }) => void;
-  onend: () => void;
+  abort(): void;
+  onstart: ((event: Event) => void) | null;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+  onend: ((event: Event) => void) | null;
+  onspeechstart: ((event: Event) => void) | null;
+  onspeechend: ((event: Event) => void) | null;
+  onaudiostart: ((event: Event) => void) | null;
+  onaudioend: ((event: Event) => void) | null;
+  onnomatch: ((event: SpeechRecognitionEvent) => void) | null;
 }
 
 declare global {
@@ -36,65 +50,204 @@ export default function Home() {
   });
   const [isListening, setIsListening] = useState(false);
   const [isSupported, setIsSupported] = useState(true);
+  const [isInitializing, setIsInitializing] = useState(false);
+  const [hasPermission, setHasPermission] = useState<boolean | null>(null);
+  const [currentLanguage, setCurrentLanguage] = useState('ur-PK');
+  const [interimTranscript, setInterimTranscript] = useState('');
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const listContainerRef = useRef<HTMLDivElement>(null);
+  const isStartingRef = useRef(false);
   const { toast } = useToast();
 
   useEffect(() => {
     localStorage.setItem('bolo-grocery-items', JSON.stringify(groceryItems));
   }, [groceryItems]);
 
+  // Initialize speech recognition
   useEffect(() => {
-    // Check if Web Speech API is supported
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setIsSupported(false);
-      return;
-    }
+    const initializeSpeechRecognition = async () => {
+      setIsInitializing(true);
+      
+      try {
+        // Check if Web Speech API is supported
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+          setIsSupported(false);
+          toast({
+            title: "Speech Recognition Not Supported",
+            description: "Your browser doesn't support speech recognition. Please use Chrome, Edge, or Safari.",
+            variant: "destructive",
+          });
+          return;
+        }
 
-    // Initialize speech recognition
-    const recognition = new SpeechRecognition();
-    recognition.continuous = false;
-    recognition.interimResults = false;
-    recognition.lang = 'ur-PK';
+        // Check microphone permission
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          stream.getTracks().forEach(track => track.stop()); // Stop the stream immediately
+          setHasPermission(true);
+        } catch (permissionError) {
+          console.warn('Microphone permission not granted yet:', permissionError);
+          setHasPermission(false);
+        }
 
-    recognition.onstart = () => {
-      setIsListening(true);
-    };
+        // Initialize speech recognition
+        const recognition = new SpeechRecognition();
+        
+        // Configure recognition settings
+        recognition.continuous = false;
+        recognition.interimResults = true;
+        recognition.maxAlternatives = 3;
+        recognition.lang = currentLanguage;
 
-    recognition.onresult = (event) => {
-      const transcript = event.results[0][0].transcript.trim();
-      if (transcript) {
-        setGroceryItems(prev => [...prev, transcript]);
+        // Event handlers
+        recognition.onstart = () => {
+          console.log('Speech recognition started');
+          setIsListening(true);
+          setInterimTranscript('');
+          isStartingRef.current = false;
+        };
+
+        recognition.onaudiostart = () => {
+          console.log('Audio capturing started');
+        };
+
+        recognition.onspeechstart = () => {
+          console.log('Speech detected');
+        };
+
+        recognition.onresult = (event) => {
+          let finalTranscript = '';
+          let interim = '';
+
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const transcript = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              finalTranscript += transcript;
+            } else {
+              interim += transcript;
+            }
+          }
+
+          setInterimTranscript(interim);
+
+          if (finalTranscript.trim()) {
+            const cleanTranscript = finalTranscript.trim();
+            setGroceryItems(prev => [...prev, cleanTranscript]);
+            setInterimTranscript('');
+            toast({
+              title: "Item Added",
+              description: `Added: ${cleanTranscript}`,
+            });
+          }
+        };
+
+        recognition.onerror = (event) => {
+          console.error('Speech recognition error:', event.error, event.message);
+          setIsListening(false);
+          setInterimTranscript('');
+          isStartingRef.current = false;
+
+          let errorTitle = "Speech Recognition Error";
+          let errorDescription = "";
+
+          switch (event.error) {
+            case 'not-allowed':
+              errorTitle = "Microphone Access Denied";
+              errorDescription = "Please allow microphone access and try again. Click the microphone icon in your browser's address bar.";
+              setHasPermission(false);
+              break;
+            case 'no-speech':
+              errorTitle = "No Speech Detected";
+              errorDescription = "Please speak clearly and try again. Make sure your microphone is working.";
+              break;
+            case 'audio-capture':
+              errorTitle = "Microphone Not Found";
+              errorDescription = "No microphone detected. Please connect a microphone and refresh the page.";
+              break;
+            case 'network':
+              errorTitle = "Network Error";
+              errorDescription = "Internet connection required for speech recognition. Please check your connection.";
+              break;
+            case 'service-not-allowed':
+              errorTitle = "Service Not Available";
+              errorDescription = "Speech recognition service is not available. Please try again later.";
+              break;
+            case 'bad-grammar':
+              errorTitle = "Recognition Error";
+              errorDescription = "Speech recognition failed. Please try speaking more clearly.";
+              break;
+            case 'language-not-supported':
+              errorTitle = "Language Not Supported";
+              errorDescription = `${currentLanguage} is not supported. Trying English fallback...`;
+              // Try fallback to English
+              if (currentLanguage !== 'en-US') {
+                setCurrentLanguage('en-US');
+                setTimeout(() => {
+                  toast({
+                    title: "Language Changed",
+                    description: "Switched to English. Please try again.",
+                  });
+                }, 1000);
+              }
+              break;
+            default:
+              errorDescription = `Recognition failed (${event.error}). Please try again or refresh the page.`;
+          }
+
+          if (event.error !== 'language-not-supported') {
+            toast({
+              title: errorTitle,
+              description: errorDescription,
+              variant: "destructive",
+            });
+          }
+        };
+
+        recognition.onend = () => {
+          console.log('Speech recognition ended');
+          setIsListening(false);
+          setInterimTranscript('');
+          isStartingRef.current = false;
+        };
+
+        recognition.onnomatch = () => {
+          console.log('No speech match found');
+          toast({
+            title: "No Match Found",
+            description: "Could not understand the speech. Please try again.",
+            variant: "destructive",
+          });
+        };
+
+        recognitionRef.current = recognition;
+        console.log('Speech recognition initialized successfully');
+
+      } catch (error) {
+        console.error('Failed to initialize speech recognition:', error);
+        setIsSupported(false);
         toast({
-          title: "Item Added",
-          description: `Added: ${transcript}`,
+          title: "Initialization Failed",
+          description: "Failed to initialize speech recognition. Please refresh the page and try again.",
+          variant: "destructive",
         });
+      } finally {
+        setIsInitializing(false);
       }
     };
 
-    recognition.onerror = (event) => {
-      console.error('Speech recognition error:', event.error);
-      setIsListening(false);
-      toast({
-        title: "Speech Recognition Error",
-        description: "Please try again. Make sure your microphone is working.",
-        variant: "destructive",
-      });
-    };
-
-    recognition.onend = () => {
-      setIsListening(false);
-    };
-
-    recognitionRef.current = recognition;
+    initializeSpeechRecognition();
 
     return () => {
       if (recognitionRef.current) {
-        recognitionRef.current.stop();
+        try {
+          recognitionRef.current.abort();
+        } catch (error) {
+          console.warn('Error stopping recognition:', error);
+        }
       }
     };
-  }, [toast]);
+  }, [toast, currentLanguage]);
 
   const handleRequestMicPermission = async () => {
     try {
@@ -113,7 +266,14 @@ export default function Home() {
     }
   };
 
-  const handleStartListening = () => {
+  const handleStartListening = async () => {
+    // Check if already starting or listening
+    if (isStartingRef.current || isListening) {
+      console.log('Already starting or listening, ignoring request');
+      return;
+    }
+
+    // Check if supported
     if (!isSupported) {
       toast({
         title: "Not Supported",
@@ -123,17 +283,88 @@ export default function Home() {
       return;
     }
 
-    if (recognitionRef.current && !isListening) {
+    // Check if still initializing
+    if (isInitializing) {
+      toast({
+        title: "Please Wait",
+        description: "Speech recognition is still initializing. Please wait a moment.",
+      });
+      return;
+    }
+
+    // Check if recognition is available
+    if (!recognitionRef.current) {
+      toast({
+        title: "Not Ready",
+        description: "Speech recognition is not ready. Please refresh the page and try again.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Request microphone permission if not granted
+    if (hasPermission === false) {
       try {
-        recognitionRef.current.start();
-      } catch (error) {
-        console.error('Error starting speech recognition:', error);
+        await navigator.mediaDevices.getUserMedia({ audio: true });
+        setHasPermission(true);
         toast({
-          title: "Error",
-          description: "Failed to start speech recognition. Please try again.",
+          title: "Permission Granted",
+          description: "Microphone access granted. You can now use voice input.",
+        });
+      } catch (error) {
+        console.error('Microphone permission error:', error);
+        toast({
+          title: "Permission Required",
+          description: "Please allow microphone access to use voice input. Click the microphone icon in your browser's address bar.",
           variant: "destructive",
         });
+        return;
       }
+    }
+
+    // Start recognition
+    isStartingRef.current = true;
+    
+    try {
+      console.log('Starting speech recognition...');
+      recognitionRef.current.start();
+      
+      // Set a timeout to reset the starting flag if start doesn't trigger onstart
+      setTimeout(() => {
+        if (isStartingRef.current && !isListening) {
+          console.warn('Speech recognition start timeout');
+          isStartingRef.current = false;
+          toast({
+            title: "Start Timeout",
+            description: "Speech recognition took too long to start. Please try again.",
+            variant: "destructive",
+          });
+        }
+      }, 3000);
+      
+    } catch (error) {
+      console.error('Error starting speech recognition:', error);
+      isStartingRef.current = false;
+      
+      let errorMessage = "Failed to start speech recognition. Please try again.";
+      
+      if (error instanceof Error) {
+        if (error.name === 'InvalidStateError') {
+          errorMessage = "Speech recognition is already running. Please wait and try again.";
+        } else if (error.name === 'NotAllowedError') {
+          errorMessage = "Microphone access denied. Please allow microphone access and try again.";
+          setHasPermission(false);
+        } else if (error.name === 'NotSupportedError') {
+          errorMessage = "Speech recognition is not supported in this browser.";
+          setIsSupported(false);
+        }
+      }
+      
+      toast({
+        title: "Start Failed",
+        description: errorMessage,
+        variant: "destructive",
+      });
     }
   };
 
@@ -316,7 +547,7 @@ export default function Home() {
                 data-testid="button-download-pdf"
                 className="flex items-center justify-center gap-2 bg-secondary hover:bg-secondary/90 text-secondary-foreground font-medium py-3 px-4 rounded-lg transition-all duration-200 shadow hover:shadow-md active:scale-95 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2">
                 <Download className="w-4 h-4" />
-                <span className="text-sm">Download PDF</span>
+                <span className="text-xs sm:text-sm">Download PDF</span>
               </button>
               
               {/* Download PNG Button */}
@@ -325,7 +556,7 @@ export default function Home() {
                 data-testid="button-download-png"
                 className="flex items-center justify-center gap-2 bg-secondary hover:bg-secondary/90 text-secondary-foreground font-medium py-3 px-4 rounded-lg transition-all duration-200 shadow hover:shadow-md active:scale-95 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2">
                 <FileImage className="w-4 h-4" />
-                <span className="text-sm">Download PNG</span>
+                <span className="text-xs sm:text-sm">Download PNG</span>
               </button>
               
               {/* Request Microphone Permission Button */}
