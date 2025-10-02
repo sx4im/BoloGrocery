@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Mic, Trash2, X, FileText, Image as ImageIcon, Plus, AlertCircle } from "lucide-react";
+import { Mic, Trash2, X, FileText, Image as ImageIcon, Plus, AlertCircle, Square } from "lucide-react";
 import jsPDF from 'jspdf';
 import * as htmlToImage from 'html-to-image';
 
@@ -11,6 +11,7 @@ export default function GroceryList() {
   const [error, setError] = useState("");
   const [manualInput, setManualInput] = useState("");
   const [speechSupported, setSpeechSupported] = useState(true);
+  const [currentTranscript, setCurrentTranscript] = useState("");
   const listRef = useRef(null);
 
   // English to Urdu transliteration mapping
@@ -111,33 +112,53 @@ export default function GroceryList() {
       const recognitionInstance = new SpeechRecognition();
       
       // Configure recognition settings
-      recognitionInstance.lang = 'ur-PK';
-      recognitionInstance.continuous = false;
-      recognitionInstance.interimResults = false;
-      recognitionInstance.maxAlternatives = 1;
-      
-      // Add timeout to prevent hanging
-      recognitionInstance.timeout = 10000;
+      recognitionInstance.lang = 'ur-PK'; // Urdu (Pakistan)
+      recognitionInstance.continuous = true; // Allow continuous listening
+      recognitionInstance.interimResults = true; // Show interim results
+      recognitionInstance.maxAlternatives = 3; // Get multiple alternatives
 
     recognitionInstance.onstart = () => {
       setIsListening(true);
-      setStatusText("بولیے...");
+      setStatusText("سن رہا ہوں... بولیے!");
+      setCurrentTranscript("");
       setError("");
     };
 
     recognitionInstance.onresult = (event) => {
-      const transcript = event.results[0][0].transcript;
-      if (transcript.trim()) {
-        setItems(prev => [...prev, { id: Date.now(), text: transcript.trim() }]);
+      let finalTranscript = '';
+      let interimTranscript = '';
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
+        }
       }
-      setIsListening(false);
-      setStatusText("");
+
+      // Update current transcript for display
+      setCurrentTranscript(interimTranscript || finalTranscript);
+
+      // If we have a final result, add it as an item
+      if (finalTranscript.trim()) {
+        let processedText = finalTranscript.trim();
+        
+        // If using English (fallback), transliterate to Urdu
+        if (recognitionInstance.lang === 'en-US') {
+          processedText = transliterateToUrdu(processedText);
+        }
+        
+        setItems(prev => [...prev, { id: Date.now(), text: processedText }]);
+        setCurrentTranscript(""); // Clear after adding
+      }
     };
 
     recognitionInstance.onerror = (event) => {
       console.error('Speech recognition error:', event.error);
       setIsListening(false);
       setStatusText("");
+      setCurrentTranscript("");
       
       let errorMessage = "";
       switch(event.error) {
@@ -159,16 +180,31 @@ export default function GroceryList() {
         case 'service-not-allowed':
           errorMessage = "Speech recognition service not available. Please use manual input instead.";
           break;
+        case 'language-not-supported':
+          errorMessage = "Urdu language not supported by your browser. Trying English fallback...";
+          // Try switching to English as fallback
+          setTimeout(() => {
+            if (recognitionInstance) {
+              recognitionInstance.lang = 'en-US';
+              setError("Switched to English. Please speak in English and it will be transliterated to Urdu.");
+              setTimeout(() => setError(""), 5000);
+            }
+          }, 1000);
+          break;
         default:
           errorMessage = `Speech recognition error (${event.error}). Please use manual input or try refreshing the page.`;
       }
-      setError(errorMessage);
-      setTimeout(() => setError(""), 10000);
+      
+      if (event.error !== 'language-not-supported') {
+        setError(errorMessage);
+        setTimeout(() => setError(""), 10000);
+      }
     };
 
     recognitionInstance.onend = () => {
       setIsListening(false);
       setStatusText("");
+      setCurrentTranscript("");
     };
 
       setRecognition(recognitionInstance);
@@ -179,31 +215,39 @@ export default function GroceryList() {
     }
   }, []);
 
-  const startListening = async () => {
-    if (!recognition || isListening) return;
+  const startListening = () => {
+    if (!recognition || isListening || !speechSupported) return;
     
     // Clear any previous errors
     setError("");
     
     try {
-      // Request microphone permission first
-      await navigator.mediaDevices.getUserMedia({ audio: true });
-      
-      // Add a small delay to ensure microphone is ready
-      setTimeout(() => {
-        try {
-          recognition.start();
-        } catch (err) {
-          console.error('Recognition start error:', err);
-          setError("Speech recognition failed to start. Please try again or use manual input.");
-          setTimeout(() => setError(""), 8000);
-        }
-      }, 100);
-      
+      recognition.start();
     } catch (err) {
-      console.error('Microphone access error:', err);
-      setError("Microphone permission denied. Please allow microphone access in your browser settings and try again.");
+      console.error('Recognition start error:', err);
+      let errorMessage = "Speech recognition failed to start.";
+      
+      if (err.name === 'InvalidStateError') {
+        errorMessage = "Speech recognition is already running. Please wait and try again.";
+      } else if (err.name === 'NotAllowedError') {
+        errorMessage = "Microphone access denied. Please allow microphone access and try again.";
+      }
+      
+      setError(errorMessage + " You can use manual input as an alternative.");
       setTimeout(() => setError(""), 8000);
+    }
+  };
+
+  const stopListening = () => {
+    if (!recognition || !isListening) return;
+    
+    try {
+      recognition.stop();
+    } catch (err) {
+      console.error('Recognition stop error:', err);
+      setIsListening(false);
+      setStatusText("");
+      setCurrentTranscript("");
     }
   };
 
@@ -322,6 +366,15 @@ export default function GroceryList() {
           </div>
         )}
 
+        {/* Current Transcript Display */}
+        {currentTranscript && (
+          <div className="bg-[#FFE4B5] border-4 border-black p-4 mb-4 transform rotate-[-0.2deg] shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] print:hidden">
+            <p className="text-lg font-bold text-center text-gray-700">
+              سن رہا ہوں: "{currentTranscript}"
+            </p>
+          </div>
+        )}
+
         {/* Manual Input Section */}
         <div className="bg-white border-4 border-black shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] p-4 mb-4 transform rotate-[0.2deg] print:hidden">
           <div className="flex gap-2">
@@ -345,14 +398,29 @@ export default function GroceryList() {
         </div>
 
         {/* Action Buttons */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6 print:hidden">
-          <button
-            onClick={startListening}
-            className="h-16 border-4 border-black shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] font-black text-lg bg-[#0080FF] hover:bg-[#0060CC] text-white rounded-none transform hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-all inline-flex items-center justify-center px-4 py-2"
-          >
-            <Mic className="w-6 h-6 mr-2" />
-            Speak Item
-          </button>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6 print:hidden">
+          {!isListening ? (
+            <button
+              onClick={startListening}
+              disabled={!speechSupported}
+              className={`h-16 border-4 border-black shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] font-black text-lg rounded-none transform transition-all inline-flex items-center justify-center px-4 py-2 ${
+                !speechSupported 
+                  ? 'bg-gray-400 text-gray-600 cursor-not-allowed' 
+                  : 'bg-[#0080FF] hover:bg-[#0060CC] text-white hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]'
+              }`}
+            >
+              <Mic className="w-6 h-6 mr-2" />
+              Start Voice
+            </button>
+          ) : (
+            <button
+              onClick={stopListening}
+              className="h-16 border-4 border-black shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] font-black text-lg bg-red-500 hover:bg-red-600 text-white rounded-none transform hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] transition-all inline-flex items-center justify-center px-4 py-2"
+            >
+              <Square className="w-6 h-6 mr-2" />
+              Stop Voice
+            </button>
+          )}
 
           <button
             onClick={downloadPDF}
